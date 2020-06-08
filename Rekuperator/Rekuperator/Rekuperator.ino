@@ -24,6 +24,7 @@
 #include <OneWire.h>
 #include <DallasTemperature.h>
 #include <EEPROM.h>
+#include <avr/wdt.h>
 
 #define ONE_WIRE_BUS 8
 #define pin_fan_rotate 3
@@ -41,10 +42,11 @@
 #define mode_ventilation_pulse_out 5
 #define mode_off 6
 #define indication_main_screen 0
-#define indication_menu_1 1
-#define indication_menu_2 2
-#define indication_menu_3 3
-#define indication_select_mode 4
+#define indication_menu 1
+//#define indication_menu_1 1
+//#define indication_menu_2 2
+//#define indication_menu_3 3
+#define indication_select_mode 2
 OneWire oneWire(ONE_WIRE_BUS);
 DallasTemperature sensors(&oneWire);
 DeviceAddress insideThermometer = { 0x28, 0xFF, 0x53, 0x52, 0x84, 0x16, 0x05, 0xC9 };
@@ -58,17 +60,25 @@ uint8_t backlight_timeout = 25; // таймаут подсветки, секун
 const uint8_t menu_timeout = 17; // таймаут нахождения в меню при неактивности, секунды
 const uint16_t lcd_refresh = 500; // частота обновлений экрана, миллисекунд
 uint16_t rekuperator_in_time = 10; // время притока в режиме рекуперации, секунды
-uint8_t rekuperator_in_out_time = 5; // пауза между притоком и вытяжкой в режиме рекуперации, секунды
+uint16_t rekuperator_in_out_time = 5; // пауза между притоком и вытяжкой в режиме рекуперации, секунды
 uint16_t rekuperator_out_time = 10; // время вытяжки в режиме рекуперации, секунды
-uint8_t rekuperator_out_in_time = 5; // пауза между вытяжкой и притоком в режиме рекуперации, секунды
+uint16_t rekuperator_out_in_time = 5; // пауза между вытяжкой и притоком в режиме рекуперации, секунды
 uint16_t ventilation_pulse_in_time = 50; // время притока в режиме прерывистой вентиляции, секунды
 uint16_t ventilation_pause_in_time = 15; // время паузы в режиме прерывистой вентиляции, секунды
 uint16_t ventilation_pulse_out_time = 50; // время вытяжки в режиме прерывистой вентиляции, секунды
 uint16_t ventilation_pause_out_time = 15; // время вытяжки в режиме прерывистой вентиляции, секунды
+int8_t defrosting_stop_temperature = 15; // температура окончаня оттайки, градусы
+uint8_t defrosting_end_time = 25; // максимальная продолжительность оттайки, минуты
+int8_t defrosting_start_temperature = -5; // температура запуска оттайки, градусы
+uint16_t defrosting_minimum_timeout = 25; // минимальный интервал между оттайками, минуты
+boolean rekuperation_adaptive = 0; // включение режима рекуперации по температуре, а не времени
+int8_t rekuperation_adaptive_temperature = 10; // уставка адаптивного температурного порога рециркуляции
 
 
 // служебные переменные (не трогать)
+uint8_t menu_step = 0;
 uint8_t lcd_blink = 0;
+boolean edit_allow = 0;
 boolean lcd_refresh_allow = 1; // при выставлении в 1 происходит отрисовка, выставляется софт таймером
 uint8_t work_mode = 1; // переменная выбора текущего режима работы
 uint8_t indication_mode = 0; // переменная текущего режима индикации
@@ -191,19 +201,6 @@ byte rus_zg[8] = // Ж - матрица
   B00000,
 };
 
-/*
-const byte rus_y[8] = // У - матрица
-{ B10001,
-  B10001,
-  B01001,
-  B00111,
-  B00001,
-  B00010,
-  B01100,
-  B00000,
-};
-*/
-
 // Setup a RoraryEncoder for pins A2 and A3:
 RotaryEncoder encoder(A2, A3);
 
@@ -233,7 +230,14 @@ lcd.createChar(6, rus_yy);
 lcd.createChar(7, rus_zg);
 lcd.begin(16, 2); // инициализация дисплея
 lcd.clear(); // очистка дисплея
-//lcd.print("hello, world!");
+lcd.print("     3A""\01""\xBF""CK     ");
+if (EEPROM.read(1) == 123)
+	{
+		EEPROM_load_parameters();
+		EEPROM.get(4, work_mode);
+	}
+delay (550);
+wdt_enable(WDTO_8S);  // разрешение работы сторожевого таймера с тайм-аутом 8 с
 }
 
 
@@ -284,15 +288,19 @@ void loop()
 }
 else if ((backlight_timeout == 0) && (digitalRead(backlight_lcd)))
 	{
-		digitalWrite(backlight_lcd, 0);
+		digitalWrite(backlight_lcd, LOW);
 	}
 else if ((backlight_timeout > 99) && (!digitalRead(backlight_lcd)))
 	{
-		digitalWrite(backlight_lcd, 1);
+		digitalWrite(backlight_lcd, HIGH);
 	}
+else
+{
+		digitalWrite(backlight_lcd, 0);
+}
 }//------------------------------------------------------------------------------
 
-{//-----------------------выход меню выбора режимов------------------------------
+{//-----------------------вход в меню выбора режима------------------------------
 if (key_data == key_pressed)
 	{
 		if (indication_mode == indication_main_screen)
@@ -300,16 +308,18 @@ if (key_data == key_pressed)
 			indication_mode = indication_select_mode;
 			key_data = 0;
 			millis_menu_timeout = millis();
-      pos = newPos;
+			pos = newPos;
 		}
 		else if (indication_mode == indication_select_mode)
 		{
+			EEPROM_save_work_mode();
 			indication_mode = indication_main_screen;
 			key_data = 0;
 		}
 	}
 }
 //-------------------------------------------------------------------------------
+
 {//----------------------меню выбора режимов-------------------------------------
 if (indication_mode == indication_select_mode)
 	{
@@ -336,39 +346,55 @@ if (indication_mode == indication_select_mode)
 	}
 		if ((millis()-millis_menu_timeout) > (menu_timeout * 1000))
 		{
+			EEPROM_save_work_mode();
 			indication_mode = indication_main_screen;
 		}
 	}
-}
+}//-------------------------------------------------------------------------------
 switch (work_mode)
 {
 	case mode_rekuperator:
 	{
 		if (lcd_refresh_allow)
+		{
+			if ((indication_mode == indication_main_screen) || (indication_mode == indication_select_mode))
 			{
-				if ((indication_mode == indication_main_screen) || ((indication_mode == indication_select_mode) && !lcd_blink))
+				if ((!lcd_blink) || (indication_mode == indication_main_screen))
 				{
-					lcd.setCursor(2, 0);
+					if (!rekuperation_adaptive)
+					{
+						lcd.setCursor(2, 0);
+					}
+					else
+					{
+						lcd.setCursor(13, 0);
+						lcd.print("EKO");
+						lcd.setCursor(0, 0);
+					}
 					lcd.print("PEK\xBF""\01""EPA\05\04\02");
 				}
-				else 
-			    {
+				else if (indication_mode == indication_select_mode)
+				{
 					lcd.setCursor(0, 0);
 					lcd.print("                ");
-			    }
-				lcd.setCursor(0, 1);
-				lcd.print(temp_in);
-				lcd.setCursor(11, 1);
-				lcd.print(temp_out);
-				lcd.setCursor(7, 1);
-				lcd.write(byte(0));
+				}
+					lcd.setCursor(0, 1);
+					lcd.print(temp_in);
+					lcd.setCursor(11, 1);
+					lcd.print(temp_out);
+					lcd.setCursor(7, 1);
+					lcd.write(byte(0));
 			}
+		}
 			if (current_stage == 1)
 			{
 				if (lcd_refresh_allow)
-					{
+					{	
+						if ((indication_mode == indication_main_screen) || (indication_mode == indication_select_mode))
+						{
 							lcd.setCursor(8, 1);
-							lcd.print(">"); 							
+							lcd.print(">"); 			
+						}
 					}
 				if (!digitalRead(pin_pwm_fan_out))
 					{
@@ -376,7 +402,7 @@ switch (work_mode)
 						digitalWrite(pin_pwm_fan_in, LOW);
 						millis_rekuperation_ventilation_time = millis();
 					}
-				else if ((millis() - millis_rekuperation_ventilation_time) > (rekuperator_out_time * 1000))
+				else if (((millis() - millis_rekuperation_ventilation_time) > (rekuperator_out_time * 1000)) || (rekuperation_adaptive && (temp_out > rekuperation_adaptive_temperature)))
 					{
 						digitalWrite(pin_pwm_fan_out, LOW);
 						digitalWrite(pin_pwm_fan_in, LOW);
@@ -387,9 +413,12 @@ switch (work_mode)
 			else if (current_stage == 2)
 			{
 				if (lcd_refresh_allow)
-					{
+					{	
+						if ((indication_mode == indication_main_screen) || (indication_mode == indication_select_mode))
+						{
 							lcd.setCursor(8, 1);
-							lcd.print("|"); 							
+							lcd.print("|"); 
+						}
 					}
 			if ((millis() - millis_rekuperation_ventilation_time) > (rekuperator_out_in_time * 1000))
 					{
@@ -401,8 +430,11 @@ switch (work_mode)
 			{
 				if (lcd_refresh_allow)
 					{
+						if ((indication_mode == indication_main_screen) || (indication_mode == indication_select_mode))
+						{
 							lcd.setCursor(8, 1);
-							lcd.print("<"); 							
+							lcd.print("<"); 	
+						}
 					}
 				if (!digitalRead(pin_pwm_fan_in))
 					{
@@ -410,7 +442,7 @@ switch (work_mode)
 						digitalWrite(pin_pwm_fan_out, LOW);
 						millis_rekuperation_ventilation_time = millis();
 					}
-				else if ((millis() - millis_rekuperation_ventilation_time) > (rekuperator_in_time * 1000))
+				else if (((millis() - millis_rekuperation_ventilation_time) > (rekuperator_in_time * 1000)) || (rekuperation_adaptive && (temp_in < rekuperation_adaptive_temperature)))
 					{
 						digitalWrite(pin_pwm_fan_in, LOW);
 						digitalWrite(pin_pwm_fan_out, LOW);
@@ -421,9 +453,12 @@ switch (work_mode)
 			else if (current_stage == 4)
 			{
 				if (lcd_refresh_allow)
-					{             
+					{    
+						if ((indication_mode == indication_main_screen) || (indication_mode == indication_select_mode))
+						{
 							lcd.setCursor(8, 1);
-							lcd.print("|"); 							
+							lcd.print("|"); 					
+						}
 					}
 			if ((millis() - millis_rekuperation_ventilation_time) > (rekuperator_in_out_time * 1000))
 					{
@@ -441,24 +476,28 @@ switch (work_mode)
   digitalWrite(pin_pwm_fan_in, HIGH);
   digitalWrite(pin_pwm_fan_out, LOW);
         if (lcd_refresh_allow)
-          {	  if ((indication_mode == indication_main_screen) || ((indication_mode == indication_select_mode) && !lcd_blink))
-			{
-				lcd.setCursor(0, 0);
-				lcd.print("     \01P\04TOK    "); 
-			}
-			else 
-			{
-				lcd.setCursor(0, 0);
-				lcd.print("                ");
-			}
-              lcd.setCursor(0, 1);
-              lcd.print(temp_in);
-              lcd.setCursor(11, 1);
-              lcd.print(temp_out);
-              lcd.setCursor(7, 1);
-              lcd.write(byte(0));
-              lcd.print("<");               
-          }
+			  {
+			  if ((indication_mode == indication_main_screen) || (indication_mode == indication_select_mode))
+			  {
+				  if ((!lcd_blink) || (indication_mode == indication_main_screen))
+					{
+						lcd.setCursor(0, 0);
+						lcd.print("     \01P\04TOK    "); 
+					}
+					else if (indication_mode == indication_select_mode) 
+					{
+						lcd.setCursor(0, 0);
+						lcd.print("                ");
+					}
+					  lcd.setCursor(0, 1);
+					  lcd.print(temp_in);
+					  lcd.setCursor(11, 1);
+					  lcd.print(temp_out);
+					  lcd.setCursor(7, 1);
+					  lcd.write(byte(0));
+					  lcd.print("<");   
+					}
+			  }
 }	
 	break;
 	
@@ -468,23 +507,26 @@ switch (work_mode)
   digitalWrite(pin_pwm_fan_out, HIGH);
         if (lcd_refresh_allow)
           {	  
-		    if ((indication_mode == indication_main_screen) || ((indication_mode == indication_select_mode) && !lcd_blink))
+			if ((indication_mode == indication_main_screen) || (indication_mode == indication_select_mode))
 			{
-              lcd.setCursor(0, 0);
-              lcd.print("    B\x06T\x02\x07KA"   );
+				if ((indication_mode == indication_main_screen) || (!lcd_blink))
+				{
+				  lcd.setCursor(0, 0);
+				  lcd.print("    B\x06T\x02\x07KA"   );
+				}
+				else if (indication_mode == indication_select_mode)
+				{
+				  lcd.setCursor(0, 0);
+				  lcd.print("                ");
+				}      
+				  lcd.setCursor(0, 1);
+				  lcd.print(temp_in);
+				  lcd.setCursor(11, 1);
+				  lcd.print(temp_out);
+				  lcd.setCursor(7, 1);
+				  lcd.write(byte(0));
+				  lcd.print(">");               
 			}
-       else 
-        {
-              lcd.setCursor(0, 0);
-              lcd.print("                ");
-        }      
-              lcd.setCursor(0, 1);
-              lcd.print(temp_in);
-              lcd.setCursor(11, 1);
-              lcd.print(temp_out);
-              lcd.setCursor(7, 1);
-              lcd.write(byte(0));
-              lcd.print(">");               
           }
 }  	
 	break;	
@@ -493,29 +535,35 @@ switch (work_mode)
 	{
 		if (lcd_refresh_allow)
           {	  
-		    if ((indication_mode == indication_main_screen) || ((indication_mode == indication_select_mode) && !lcd_blink))
+			if ((indication_mode == indication_main_screen) || (indication_mode == indication_select_mode))
 			{
-				lcd.setCursor(0, 0);
-				lcd.print("  \01P\04TOK \05\04K\03.  ");   
+				if ((indication_mode == indication_main_screen) || (!lcd_blink))
+				{
+					lcd.setCursor(0, 0);
+					lcd.print("  \01P\04TOK \05\04K\03.  ");   
+				}
+				else  if (indication_mode == indication_select_mode)
+				{
+				  lcd.setCursor(0, 0);
+				  lcd.print("                ");
+				}
+				  lcd.setCursor(0, 1);
+				  lcd.print(temp_in);
+				  lcd.setCursor(11, 1);
+				  lcd.print(temp_out);
+				  lcd.setCursor(7, 1);
+				  lcd.write(byte(0));         
 			}
-			else 
-			{
-			  lcd.setCursor(0, 0);
-			  lcd.print("                ");
-			}
-              lcd.setCursor(0, 1);
-              lcd.print(temp_in);
-              lcd.setCursor(11, 1);
-              lcd.print(temp_out);
-              lcd.setCursor(7, 1);
-              lcd.write(byte(0));         
           }
 			if (current_stage == 1)
 			{
 				if (lcd_refresh_allow)
 					{
-							lcd.setCursor(8, 1);
-							lcd.print("<"); 							
+						if ((indication_mode == indication_main_screen) || (indication_mode == indication_select_mode))
+							{
+								lcd.setCursor(8, 1);
+								lcd.print("<"); 						
+							}
 					}
 				if (!digitalRead(pin_pwm_fan_in))
 					{
@@ -535,8 +583,11 @@ switch (work_mode)
 			{
 				if (lcd_refresh_allow)
 					{
+						if ((indication_mode == indication_main_screen) || (indication_mode == indication_select_mode))
+						{
 							lcd.setCursor(8, 1);
-							lcd.print("|"); 							
+							lcd.print("|"); 				
+						}
 					}
 			if ((millis() - millis_rekuperation_ventilation_time) > (ventilation_pause_in_time * 1000))
 					{
@@ -553,12 +604,14 @@ switch (work_mode)
 {	
         if (lcd_refresh_allow)
           {
-			  if ((indication_mode == indication_main_screen) || ((indication_mode == indication_select_mode) && !lcd_blink))
+			if ((indication_mode == indication_main_screen) || (indication_mode == indication_select_mode))
+			{
+			  if ((indication_mode == indication_main_screen) || ( !lcd_blink))
 			  {
 				lcd.setCursor(0, 0);
 				lcd.print("  B\x06T\x02\x07KA \05\04K\03. ");  
 			  }
-			  else 
+			  else  if (indication_mode == indication_select_mode) 
 			  {
 			  lcd.setCursor(0, 0);
 			  lcd.print("                ");
@@ -568,14 +621,18 @@ switch (work_mode)
               lcd.setCursor(11, 1);
               lcd.print(temp_out);
               lcd.setCursor(7, 1);
-              lcd.write(byte(0));			  
+              lcd.write(byte(0));	
+			}
           }
 			if (current_stage == 1)
 			{
 				if (lcd_refresh_allow)
 					{
+						if ((indication_mode == indication_main_screen) || (indication_mode == indication_select_mode))
+						{
 							lcd.setCursor(8, 1);
-							lcd.print(">"); 							
+							lcd.print(">"); 			
+						}
 					}
 				if (!digitalRead(pin_pwm_fan_out))
 					{
@@ -595,8 +652,11 @@ switch (work_mode)
 			{
 				if (lcd_refresh_allow)
 					{
+						if ((indication_mode == indication_main_screen) || (indication_mode == indication_select_mode))
+						{
 							lcd.setCursor(8, 1);
-							lcd.print("|"); 							
+							lcd.print("|"); 		
+						}
 					}
 			if ((millis() - millis_rekuperation_ventilation_time) > (ventilation_pause_out_time * 1000))
 					{
@@ -614,12 +674,14 @@ switch (work_mode)
       digitalWrite(pin_relay, HIGH);
               if (lcd_refresh_allow)
           {
-			  if ((indication_mode == indication_main_screen) || ((indication_mode == indication_select_mode) && !lcd_blink))
+		  if ((indication_mode == indication_main_screen) || (indication_mode == indication_select_mode))
+		  {
+			  if ((indication_mode == indication_main_screen) || (!lcd_blink))
 			  {
 				lcd.setCursor(0, 0);
 				lcd.print("  STANDBY MODE  ");       
 			  }
-			  else 
+			  else  if (indication_mode == indication_select_mode)
 			  {
 			  lcd.setCursor(0, 0);
 			  lcd.print("                ");
@@ -630,34 +692,481 @@ switch (work_mode)
               lcd.print(temp_out);
               lcd.setCursor(7, 1);
               lcd.write(byte(0));
-              lcd.print("|");               
+              lcd.print("|");          
+			}
           }
     
    }
 
 }
 
+//-------------------------вход в меню настроек----------------------------------
+if (key_data == key_holded)
+	{
+		if (indication_mode == indication_main_screen)
+		{
+			indication_mode = indication_menu;
+			key_data = 0;
+			millis_menu_timeout = millis();
+			pos = newPos;
+			menu_step = 1;
+			lcd.clear();
+		}
+	}
+//-------------------------------------------------------------------------------
+
+//------------------------------меню настроек------------------------------------
+if (indication_mode == indication_menu)
+{
+if (((millis()- millis_menu_timeout) > (menu_timeout*1000)) || (key_data == key_holded)) // выход из меню настроек по таймауту
+{
+	EEPROM_save_parameters();		
+	indication_mode = indication_main_screen;
+	key_data = 0;
+	pos = newPos;
+	menu_step = 0;
+	lcd.clear();
+}
+if (key_data == key_pressed)
+	{
+			edit_allow = !edit_allow;
+			key_data = 0;
+			millis_menu_timeout = millis();
+	}
+if (pos != newPos)
+{
+millis_menu_timeout = millis();
+}
+if (edit_allow)
+	{
+		lcd_arrows_blink();
+	}
+	else
+	{
+		lcd_arrows();
+		if (pos != newPos) 
+		{
+			if ((pos > newPos) && menu_step < 15)
+			{
+				menu_step++;
+				lcd.clear();
+			}
+			else if ((pos < newPos) && menu_step > 1)
+			{
+				menu_step--;  
+				lcd.clear();
+			}
+			pos = newPos;
+		}	
+	}
+switch (menu_step)
+	{
+	case 1:
+		{
+		if (lcd_refresh_allow)
+		{
+			lcd.setCursor(0,0);
+			lcd.print(" backlight time ");
+			lcd.setCursor(5,1);
+			if (backlight_timeout < 100)
+			{
+				lcd.print(backlight_timeout);
+				lcd.print(" sek. ");
+			}
+			else
+			{
+				lcd.print("inf.     ");
+			}
+		}
+		if (pos != newPos)
+		{
+			millis_menu_timeout = millis();
+			if ((pos > newPos) && (backlight_timeout < 100))
+			{
+				backlight_timeout++;
+			}
+			else if ((pos < newPos) && (backlight_timeout > 1))
+			{
+				backlight_timeout--;        
+			}
+			pos = newPos;
+		}
+		}
+	break;
+	
+	case 2:
+	{
+		if (lcd_refresh_allow)
+		{
+			lcd.setCursor(0,0);
+			lcd.print("rek in time");
+			lcd.setCursor(6,1);
+			lcd.print(rekuperator_in_time);
+			lcd.print(" sek. ");
+		}	
+		if (pos != newPos)
+		{
+			millis_menu_timeout = millis();
+			if ((pos > newPos) && (rekuperator_in_time < 3000))
+			{
+				rekuperator_in_time++;
+			}
+			else if ((pos < newPos) && (rekuperator_in_time > 1))
+			{
+				rekuperator_in_time--;        
+			}
+			pos = newPos;
+		}
+	}	
+	break;	
+		
+	case 3:
+	{
+		if (lcd_refresh_allow)
+		{
+			lcd.setCursor(0,0);
+			lcd.print("rek in-out pause");
+			lcd.setCursor(6,1);
+			lcd.print(rekuperator_in_out_time);
+			lcd.print(" sek. ");	
+		}
+		if (pos != newPos)
+		{
+			millis_menu_timeout = millis();
+			if ((pos > newPos) && (rekuperator_in_out_time < 3000))
+			{
+				rekuperator_in_out_time++;
+			}
+			else if ((pos < newPos) && (rekuperator_in_out_time > 1))
+			{
+				rekuperator_in_out_time--;        
+			}
+			pos = newPos;
+		}
+	}
+	break;
+	
+	case 4:
+	{
+		if (lcd_refresh_allow)
+		{
+		lcd.setCursor(0,0);
+		lcd.print("rek out time");
+		lcd.setCursor(6,1);
+		lcd.print(rekuperator_out_time);
+		lcd.print(" sek. ");
+		}
+		if (pos != newPos)
+		{
+			millis_menu_timeout = millis();
+			if ((pos > newPos) && (rekuperator_out_time < 3000))
+			{
+				rekuperator_out_time++;
+			}
+			else if ((pos < newPos) && (rekuperator_out_time > 1))
+			{
+				rekuperator_out_time--;        
+			}
+			pos = newPos;
+		}	
+	}
+	break;	
+		
+	case 5:
+	{
+		if (lcd_refresh_allow)
+		{
+			lcd.setCursor(0,0);
+			lcd.print("rek out pause");
+			lcd.setCursor(6,1);
+			lcd.print(rekuperator_out_in_time);
+			lcd.print(" sek. ");
+		}
+		if (pos != newPos)
+		{
+			millis_menu_timeout = millis();
+			if ((pos > newPos) && (rekuperator_out_in_time < 3000))
+			{
+				rekuperator_out_in_time++;
+			}
+			else if ((pos < newPos) && (rekuperator_out_in_time > 1))
+			{
+				rekuperator_out_in_time--;        
+			}
+			pos = newPos;
+		}	
+	}
+	break;	
+		
+	case 6:
+	{
+		if (lcd_refresh_allow)
+		{
+			lcd.setCursor(0,0);
+			lcd.print("vent pulse out");
+			lcd.setCursor(6,1);
+			lcd.print(ventilation_pulse_out_time);
+			lcd.print(" sek. ");
+		}
+		if (pos != newPos)
+		{
+			millis_menu_timeout = millis();
+			if ((pos > newPos) && (ventilation_pulse_out_time < 3000))
+			{
+				ventilation_pulse_out_time++;
+			}
+			else if ((pos < newPos) && (ventilation_pulse_out_time > 1))
+			{
+				ventilation_pulse_out_time--;        
+			}
+			pos = newPos;
+		}
+	}
+	break;	
+		
+	case 7:
+	{
+		if (lcd_refresh_allow)
+		{
+			lcd.setCursor(0,0);
+			lcd.print("vent pause out");
+			lcd.setCursor(6,1);
+			lcd.print(ventilation_pause_out_time);
+			lcd.print(" sek. ");
+		}
+		if (pos != newPos)
+		{
+			millis_menu_timeout = millis();
+			if ((pos > newPos) && (ventilation_pause_out_time < 3000))
+			{
+				ventilation_pause_out_time++;
+			}
+			else if ((pos < newPos) && (ventilation_pause_out_time > 1))
+			{
+				ventilation_pause_out_time--;        
+			}
+			pos = newPos;
+		}
+	}
+	break;	
+	
+	case 8:
+	{
+		if (lcd_refresh_allow)
+		{
+			lcd.setCursor(0,0);
+			lcd.print("vent pulse in");
+			lcd.setCursor(6,1);
+			lcd.print(ventilation_pulse_in_time);
+			lcd.print(" sek. ");
+		}
+		if (pos != newPos)
+		{
+			millis_menu_timeout = millis();
+			if ((pos > newPos) && (ventilation_pulse_in_time < 3000))
+			{
+				ventilation_pulse_in_time++;
+			}
+			else if ((pos < newPos) && (ventilation_pulse_in_time > 1))
+			{
+				ventilation_pulse_in_time--;        
+			}
+			pos = newPos;
+		}
+	}
+	break;	
+	
+	case 9:
+	{
+		if (lcd_refresh_allow)
+		{
+		lcd.setCursor(0,0);
+		lcd.print("vent pause in");
+		lcd.setCursor(6,1);
+		lcd.print(ventilation_pause_in_time);
+		lcd.print(" sek. ");
+		}
+		if (pos != newPos)
+		{
+			millis_menu_timeout = millis();
+			if ((pos > newPos) && (ventilation_pause_in_time < 3000))
+			{
+				ventilation_pause_in_time++;
+			}
+			else if ((pos < newPos) && (ventilation_pause_in_time > 1))
+			{
+				ventilation_pause_in_time--;        
+			}
+			pos = newPos;
+		}	
+	}
+	break;	
+	
+	case 10:
+	{
+		if (lcd_refresh_allow)
+		{
+			lcd.setCursor(0,0);
+			lcd.print("defrost stop t\xDF""C");
+			lcd.setCursor(6,1);
+			lcd.print(defrosting_stop_temperature);
+			lcd.print("\xDF""C      ");
+		}
+		if (pos != newPos)
+		{
+			millis_menu_timeout = millis();
+			if ((pos > newPos) && (defrosting_stop_temperature < 30))
+			{
+				defrosting_stop_temperature++;
+			}
+			else if ((pos < newPos) && (defrosting_stop_temperature > -10))
+			{
+				defrosting_stop_temperature--;        
+			}
+			pos = newPos;
+		}	
+	}
+	break;	
+	
+	case 11:
+	{
+		if (lcd_refresh_allow)
+		{
+			lcd.setCursor(0,0);
+			lcd.print("defrost end time");
+			lcd.setCursor(6,1);
+			lcd.print(defrosting_end_time);
+			lcd.print(" min. ");
+		}
+		if (pos != newPos)
+		{
+			millis_menu_timeout = millis();
+			if ((pos > newPos) && (defrosting_end_time < 45))
+			{
+				defrosting_end_time++;
+			}
+			else if ((pos < newPos) && (defrosting_end_time > 1))
+			{
+				defrosting_end_time--;        
+			}
+			pos = newPos;
+		}
+	}
+	break;	
+	
+	case 12:
+	{
+		if (lcd_refresh_allow)
+		{
+		lcd.setCursor(0,0);
+		lcd.print("defrost start t\xDF""C");
+		lcd.setCursor(6,1);
+		lcd.print(defrosting_start_temperature);
+		lcd.print("\xDF""C      ");
+		}
+		if (pos != newPos)
+		{
+			millis_menu_timeout = millis();
+			if ((pos > newPos) && (defrosting_start_temperature < 30))
+			{
+				defrosting_start_temperature++;
+			}
+			else if ((pos < newPos) && (defrosting_start_temperature > -10))
+			{
+				defrosting_start_temperature--;        
+			}
+			pos = newPos;
+		}
+	}
+	break;	
+	
+	case 13:
+	{
+		if (lcd_refresh_allow)
+		{
+		lcd.setCursor(0,0);
+		lcd.print("defrost inteval");
+		lcd.setCursor(6,1);
+		lcd.print(defrosting_minimum_timeout);
+		lcd.print(" min. ");
+		}
+		if (pos != newPos)
+		{
+			millis_menu_timeout = millis();
+			if ((pos > newPos) && (defrosting_minimum_timeout < 300))
+			{
+				defrosting_minimum_timeout++;
+			}
+			else if ((pos < newPos) && (defrosting_minimum_timeout > 1))
+			{
+				defrosting_minimum_timeout--;        
+			}
+			pos = newPos;
+		}
+	}
+	break;	
+				
+	case 14:
+	{
+		if (lcd_refresh_allow)
+		{
+			lcd.setCursor(0,0);
+			lcd.print("rekup. adaptive ");
+			lcd.setCursor(6,1);
+			lcd.print(rekuperation_adaptive);
+			lcd.print("         ");
+		}
+		if (pos != newPos)
+		{
+			rekuperation_adaptive = !rekuperation_adaptive;
+			pos = newPos;
+		}
+	}
+	break;	
+		
+	
+	case 15:
+	{	if (lcd_refresh_allow)
+		{
+			lcd.setCursor(0,0);
+			lcd.print("adaptive t\xDF""C");
+			lcd.setCursor(6,1);
+			lcd.print(rekuperation_adaptive_temperature);
+			lcd.print("\xDF""C      ");
+		}
+		if (pos != newPos)
+		{
+			millis_menu_timeout = millis();
+			if ((pos > newPos) && (rekuperation_adaptive_temperature < 20))
+			{
+				rekuperation_adaptive_temperature++;
+			}
+			else if ((pos < newPos) && (rekuperation_adaptive_temperature > 1))
+			{
+				rekuperation_adaptive_temperature--;        
+			}
+			pos = newPos;
+		}
+	}
+	break;
+	}
+	pos = newPos;
+	key_data = 0;
+}//--------------------------------------------------------------------------------
+
+
+
+
+
+
+
+
+
+
+
+//-------------------------------------------------------------------------------
 
 /*
-
-    if (pos != newPos) 
-  {
-      if ((pos > newPos) && fan_rpp < 250)
-      {
-        fan_rpp++;
-      }
-      else if ((pos < newPos) && fan_rpp > 0)
-      {
-        fan_rpp--;        
-      }
-//    Serial.print(newPos);
-//    Serial.println();
-    pos = newPos;
-  } 
-  
- 
-  
-  
  	if ((millis() - millis_fan_rotate_scan) > 150)
 	{
 	uint32_t fan_impulse_period_read_temp = 0;
@@ -678,8 +1187,6 @@ switch (work_mode)
 	lcd.print("out: ");	
 	lcd.print(temp_out);
 
-
-	
 //  lcd.print(fan_speed); 
 //  lcd.print("  ");  
 //	lcd.setCursor(10, 0);
@@ -690,36 +1197,7 @@ switch (work_mode)
 //  lcd.print("  ");  
   
 	}
-	
-	*/
 
-	
-	
-
-/*
-  if (key_data == key_holded) //
-{
-digitalWrite(LED_BUILTIN,HIGH);
-digitalWrite(pin_relay,HIGH);
-analogWrite(pin_pwm_fan_in, fan_speed); //0-255
-//digitalWrite(pin_pwm_fan_in,HIGH);
-digitalWrite(pin_pwm_fan_out,LOW);
-//work_millis = millis();
-//ozone_millis = millis();
-key_data = 0; //
-}
-
-  if (key_data == key_pressed) // 
-{
-digitalWrite(LED_BUILTIN,LOW);
-digitalWrite(pin_relay,LOW);
-digitalWrite(pin_pwm_fan_in,LOW);
-analogWrite(pin_pwm_fan_out, fan_speed); //0-255
-//digitalWrite(pin_pwm_fan_out,HIGH);
-//work_millis = millis();
-//ozone_millis = 0;
-key_data = 0; //
-}
 */
 if ((millis() - millis_temp_scan) > 1000)
   {
@@ -778,9 +1256,10 @@ void lcd_refresh_timer()
 	if ((millis()-millis_lcd_refresh) > lcd_refresh)
 	{
 		lcd_refresh_allow = 1;
-    lcd_blink++;
-    if (lcd_blink > 1) {lcd_blink = 0;}
-    millis_lcd_refresh = millis();
+		lcd_blink++;
+		if (lcd_blink > 1) {lcd_blink = 0;}
+		millis_lcd_refresh = millis();
+		wdt_reset();  // сброс сторожевого таймера
 	}
 }
 void rotate_counter()
@@ -792,3 +1271,94 @@ void rotate_counter()
 	}
     micros_impulse_diff = micros();
 }
+
+void EEPROM_save_parameters()
+{
+lcd.clear();
+EEPROM.update (1, 123);
+EEPROM.put (4, work_mode);
+EEPROM.put (5, backlight_timeout); // таймаут подсветки, секунды
+EEPROM.put (6, rekuperator_in_time); // время притока в режиме рекуперации, секунды
+EEPROM.put (8, rekuperator_in_out_time); // пауза между притоком и вытяжкой в режиме рекуперации, секунды
+EEPROM.put (10, rekuperator_out_time); // время вытяжки в режиме рекуперации, секунды
+EEPROM.put (12, rekuperator_out_in_time); // пауза между вытяжкой и притоком в режиме рекуперации, секунды
+EEPROM.put (14, ventilation_pulse_in_time); // время притока в режиме прерывистой вентиляции, секунды
+EEPROM.put (16, ventilation_pause_in_time); // время паузы в режиме прерывистой вентиляции, секунды
+EEPROM.put (18, ventilation_pulse_out_time); // время вытяжки в режиме прерывистой вентиляции, секунды
+EEPROM.put (20, ventilation_pause_out_time); // время вытяжки в режиме прерывистой вентиляции, секунды
+EEPROM.put (22, defrosting_stop_temperature); // температура окончаня оттайки, градусы
+EEPROM.put (23, defrosting_end_time); // максимальная продолжительность оттайки, минуты
+EEPROM.put (24, defrosting_start_temperature); // температура запуска оттайки, градусы
+EEPROM.put (25, defrosting_minimum_timeout); // минимальный интервал между оттайками, минуты
+EEPROM.put (27, rekuperation_adaptive); // включение режима рекуперации по температуре, а не времени
+EEPROM.put (28, defrosting_minimum_timeout); // уставка адаптивного температурного порога рециркуляции
+uint16_t eeprom_write_counter = 0;
+EEPROM.get (2, eeprom_write_counter);
+eeprom_write_counter++;
+EEPROM.put (2, eeprom_write_counter);
+lcd.setCursor (0,0);
+lcd.print ("   COXPAHEHO    ");
+lcd.setCursor (0,1);
+lcd.print ("   ");
+lcd.print (eeprom_write_counter);
+lcd.print (" PA3");
+delay (1000);
+lcd.clear();
+// свободная с 29й
+}
+
+void EEPROM_load_parameters()
+{
+EEPROM.get (4, work_mode);
+EEPROM.get (5, backlight_timeout); // таймаут подсветки, секунды
+EEPROM.get (6, rekuperator_in_time); // время притока в режиме рекуперации, секунды
+EEPROM.get (8, rekuperator_in_out_time); // пауза между притоком и вытяжкой в режиме рекуперации, секунды
+EEPROM.get (10, rekuperator_out_time); // время вытяжки в режиме рекуперации, секунды
+EEPROM.get (12, rekuperator_out_in_time); // пауза между вытяжкой и притоком в режиме рекуперации, секунды
+EEPROM.get (14, ventilation_pulse_in_time); // время притока в режиме прерывистой вентиляции, секунды
+EEPROM.get (16, ventilation_pause_in_time); // время паузы в режиме прерывистой вентиляции, секунды
+EEPROM.get (18, ventilation_pulse_out_time); // время вытяжки в режиме прерывистой вентиляции, секунды
+EEPROM.get (20, ventilation_pause_out_time); // время вытяжки в режиме прерывистой вентиляции, секунды
+EEPROM.get (22, defrosting_stop_temperature); // температура окончаня оттайки, градусы
+EEPROM.get (23, defrosting_end_time); // максимальная продолжительность оттайки, минуты
+EEPROM.get (24, defrosting_start_temperature); // температура запуска оттайки, градусы
+EEPROM.get (25, defrosting_minimum_timeout); // минимальный интервал между оттайками, минуты
+EEPROM.get (27, rekuperation_adaptive); // включение режима рекуперации по температуре, а не времени
+EEPROM.get (28, defrosting_minimum_timeout); // уставка адаптивного температурного порога рециркуляции
+}
+
+
+void EEPROM_save_work_mode()
+{
+uint16_t eeprom_write_counter = 0;
+EEPROM.put (4, work_mode);
+EEPROM.get (2, eeprom_write_counter);
+eeprom_write_counter++;
+EEPROM.put (2, eeprom_write_counter);
+}
+
+void lcd_arrows_blink()
+{
+	if (!lcd_blink)
+	{
+		lcd.setCursor(0, 1);
+        lcd.print("<");
+        lcd.setCursor(15, 1);
+        lcd.print(">");
+	}
+	else
+	{
+		lcd.setCursor(0, 1);
+        lcd.print(" ");
+        lcd.setCursor(15, 1);
+        lcd.print(" ");
+	}
+}
+
+void lcd_arrows()
+{
+	lcd.setCursor(0, 1);
+    lcd.print("<");
+    lcd.setCursor(15, 1);
+    lcd.print(">");
+	}
