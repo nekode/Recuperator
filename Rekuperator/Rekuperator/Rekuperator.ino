@@ -43,17 +43,11 @@
 #define mode_off 6
 #define indication_main_screen 0
 #define indication_menu 1
-//#define indication_menu_1 1
-//#define indication_menu_2 2
-//#define indication_menu_3 3
 #define indication_select_mode 2
 OneWire oneWire(ONE_WIRE_BUS);
 DallasTemperature sensors(&oneWire);
 DeviceAddress insideThermometer = { 0x28, 0xFF, 0x53, 0x52, 0x84, 0x16, 0x05, 0xC9 };
 DeviceAddress outsideThermometer   = { 0x28, 0xFF, 0x51, 0x56, 0x84, 0x16, 0x05, 0x44 };
-//DeviceAddress insideThermometer, outsideThermometer;
-//Device 0 Address: 28FF515684160544
-//Device 1 Address: 28FF5352841605C9
 
 // данные настройки, изменяемые пользователем
 uint8_t backlight_timeout = 25; // таймаут подсветки, секунды
@@ -177,7 +171,7 @@ const byte rus_c[8] = // Ц - матрица
   B00001,
 };
 
-byte rus_yy[8] = // Ы - матрица
+const byte rus_yy[8] = // Ы - матрица
 {
   B10001,
   B10001,
@@ -189,7 +183,7 @@ byte rus_yy[8] = // Ы - матрица
   B00000,
 };
 
-byte rus_zg[8] = // Ж - матрица
+const byte rus_zg[8] = // Ж - матрица
 {
   B10101,
   B10101,
@@ -201,7 +195,6 @@ byte rus_zg[8] = // Ж - матрица
   B00000,
 };
 
-// Setup a RoraryEncoder for pins A2 and A3:
 RotaryEncoder encoder(A2, A3);
 
 void setup()
@@ -280,7 +273,7 @@ void loop()
   }
  if (digitalRead(backlight_lcd)) 
   {
-	if ((millis() - millis_backlight) > (backlight_timeout*1000))
+	if ((millis() - millis_backlight) > ((uint32_t(backlight_timeout))*1000))
 	{
 		digitalWrite(backlight_lcd, LOW);		
 	}
@@ -296,7 +289,7 @@ else if ((backlight_timeout > 99) && (!digitalRead(backlight_lcd)))
 	}
 else
 {
-		digitalWrite(backlight_lcd, 0);
+		digitalWrite(backlight_lcd, LOW);
 }
 }//------------------------------------------------------------------------------
 
@@ -378,12 +371,7 @@ switch (work_mode)
 					lcd.setCursor(0, 0);
 					lcd.print("                ");
 				}
-					lcd.setCursor(0, 1);
-					lcd.print(temp_in);
-					lcd.setCursor(11, 1);
-					lcd.print(temp_out);
-					lcd.setCursor(7, 1);
-					lcd.write(byte(0));
+					lcd_print_temp();
 			}
 		}
 			if (current_stage == 1)
@@ -489,12 +477,7 @@ switch (work_mode)
 						lcd.setCursor(0, 0);
 						lcd.print("                ");
 					}
-					  lcd.setCursor(0, 1);
-					  lcd.print(temp_in);
-					  lcd.setCursor(11, 1);
-					  lcd.print(temp_out);
-					  lcd.setCursor(7, 1);
-					  lcd.write(byte(0));
+					  lcd_print_temp();
 					  lcd.print("<");   
 					}
 			  }
@@ -519,16 +502,11 @@ switch (work_mode)
 				  lcd.setCursor(0, 0);
 				  lcd.print("                ");
 				}      
-				  lcd.setCursor(0, 1);
-				  lcd.print(temp_in);
-				  lcd.setCursor(11, 1);
-				  lcd.print(temp_out);
-				  lcd.setCursor(7, 1);
-				  lcd.write(byte(0));
+				  lcd_print_temp();
 				  lcd.print(">");               
 			}
           }
-}  	
+}
 	break;	
 	
 	case mode_ventilation_pulse_in:
@@ -547,12 +525,7 @@ switch (work_mode)
 				  lcd.setCursor(0, 0);
 				  lcd.print("                ");
 				}
-				  lcd.setCursor(0, 1);
-				  lcd.print(temp_in);
-				  lcd.setCursor(11, 1);
-				  lcd.print(temp_out);
-				  lcd.setCursor(7, 1);
-				  lcd.write(byte(0));         
+				  lcd_print_temp();        
 			}
           }
 			if (current_stage == 1)
@@ -616,12 +589,7 @@ switch (work_mode)
 			  lcd.setCursor(0, 0);
 			  lcd.print("                ");
 			  }
-              lcd.setCursor(0, 1);
-              lcd.print(temp_in);
-              lcd.setCursor(11, 1);
-              lcd.print(temp_out);
-              lcd.setCursor(7, 1);
-              lcd.write(byte(0));	
+              lcd_print_temp();	
 			}
           }
 			if (current_stage == 1)
@@ -686,12 +654,7 @@ switch (work_mode)
 			  lcd.setCursor(0, 0);
 			  lcd.print("                ");
 			  }
-              lcd.setCursor(0, 1);
-              lcd.print(temp_in);
-              lcd.setCursor(11, 1);
-              lcd.print(temp_out);
-              lcd.setCursor(7, 1);
-              lcd.write(byte(0));
+              lcd_print_temp();
               lcd.print("|");          
 			}
           }
@@ -799,7 +762,7 @@ switch (menu_step)
 		if (lcd_refresh_allow)
 		{
 			lcd.setCursor(0,0);
-			lcd.print("rek in time");
+			lcd.print(" rekup. in time ");
 			lcd.setCursor(6,1);
 			lcd.print(rekuperator_in_time);
 			lcd.print(" sek. ");
@@ -851,7 +814,7 @@ switch (menu_step)
 		if (lcd_refresh_allow)
 		{
 		lcd.setCursor(0,0);
-		lcd.print("rek out time");
+		lcd.print("rekup. out time ");
 		lcd.setCursor(6,1);
 		lcd.print(rekuperator_out_time);
 		lcd.print(" sek. ");
@@ -877,7 +840,7 @@ switch (menu_step)
 		if (lcd_refresh_allow)
 		{
 			lcd.setCursor(0,0);
-			lcd.print("rek out pause");
+			lcd.print("rek out-in pause");
 			lcd.setCursor(6,1);
 			lcd.print(rekuperator_out_in_time);
 			lcd.print(" sek. ");
@@ -1206,7 +1169,7 @@ if ((millis() - millis_temp_scan) > 1000)
   temp_out = sensors.getTempC(outsideThermometer);
   millis_temp_scan = millis();
   }
-if (indication_mode == indication_main_screen) // если находимся в основном режиме - сбрасываем показания энкодера для корректной работы таймаута подсветки
+if (indication_mode != indication_select_mode) // если не находимся в меню выбора режима работы - сбрасываем показания энкодера для корректной работы таймаута подсветки
 	{
 		pos = newPos;
 	}
@@ -1292,6 +1255,8 @@ EEPROM.put (24, defrosting_start_temperature); // температура зап�
 EEPROM.put (25, defrosting_minimum_timeout); // минимальный интервал между оттайками, минуты
 EEPROM.put (27, rekuperation_adaptive); // включение режима рекуперации по температуре, а не времени
 EEPROM.put (28, defrosting_minimum_timeout); // уставка адаптивного температурного порога рециркуляции
+EEPROM.put (30, rekuperation_adaptive); // флаг включения адаптивного режима рециркуляции
+EEPROM.put (31, rekuperation_adaptive_temperature); // температура триггера адаптивного режима рециркуляции
 uint16_t eeprom_write_counter = 0;
 EEPROM.get (2, eeprom_write_counter);
 eeprom_write_counter++;
@@ -1304,7 +1269,7 @@ lcd.print (eeprom_write_counter);
 lcd.print (" PA3");
 delay (1000);
 lcd.clear();
-// свободная с 29й
+// свободная с 32й
 }
 
 void EEPROM_load_parameters()
@@ -1325,6 +1290,8 @@ EEPROM.get (24, defrosting_start_temperature); // температура зап�
 EEPROM.get (25, defrosting_minimum_timeout); // минимальный интервал между оттайками, минуты
 EEPROM.get (27, rekuperation_adaptive); // включение режима рекуперации по температуре, а не времени
 EEPROM.get (28, defrosting_minimum_timeout); // уставка адаптивного температурного порога рециркуляции
+EEPROM.put (30, rekuperation_adaptive); // флаг включения адаптивного режима рециркуляции
+EEPROM.put (31, rekuperation_adaptive_temperature); // температура триггера адаптивного режима рециркуляции
 }
 
 
@@ -1361,4 +1328,16 @@ void lcd_arrows()
     lcd.print("<");
     lcd.setCursor(15, 1);
     lcd.print(">");
-	}
+}
+	
+void lcd_print_temp()
+{
+	lcd.setCursor(0, 1);
+	lcd.print(temp_in);
+	lcd.print("\xDF");
+	lcd.setCursor(10, 1);
+	lcd.print(temp_out);
+	lcd.print("\xDF");	
+	lcd.setCursor(7, 1);
+	lcd.write(byte(0));
+}
